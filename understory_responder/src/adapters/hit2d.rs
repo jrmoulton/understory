@@ -144,7 +144,7 @@ mod integration_tests {
         let mut tree = Tree::new();
 
         // Single node whose AABB contains the query point.
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(-10.0, -10.0, 10.0, 10.0),

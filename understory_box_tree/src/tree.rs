@@ -32,7 +32,7 @@ use crate::util::{rect_to_aabb, transform_rect_bbox};
 ///
 /// // Create a tree and a single root node.
 /// let mut tree = Tree::new();
-/// let root = tree.insert(
+/// let root = tree.push_child(
 ///     None,
 ///     LocalNode {
 ///         local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -56,6 +56,8 @@ pub struct Tree<B: Backend<f64> = FlatVec<f64>> {
     pub(crate) index: IndexGeneric<f64, NodeId, B>,
     needs_commit: bool,
     dirty_roots: Vec<NodeId>,
+    /// Ordered list of root nodes (parent == None), in insertion order.
+    roots: Vec<NodeId>,
 }
 
 impl<B: Backend<f64> + core::fmt::Debug> core::fmt::Debug for Tree<B> {
@@ -204,6 +206,7 @@ impl Tree {
             index: IndexGeneric::new(),
             needs_commit: false,
             dirty_roots: Vec::new(),
+            roots: Vec::new(),
         }
     }
 }
@@ -219,6 +222,7 @@ impl<B: Backend<f64>> Tree<B> {
             index: IndexGeneric::with_backend(backend),
             needs_commit: false,
             dirty_roots: Vec::new(),
+            roots: Vec::new(),
         }
     }
 
@@ -241,12 +245,8 @@ impl<B: Backend<f64>> Tree<B> {
         self.dirty_roots.push(id);
     }
 
-    /// Insert a new node as a child of `parent` (or as a root if `None`).
-    ///
-    /// The returned [`NodeId`] becomes live immediately, but world-space data
-    /// (`world_transform`, `world_bounds`) and the spatial index are only
-    /// updated on the next call to [`Tree::commit`].
-    pub fn insert(&mut self, parent: Option<NodeId>, local: LocalNode) -> NodeId {
+    /// Allocate a new node slot and return its `NodeId` without linking it into the tree.
+    fn alloc_node(&mut self, local: LocalNode) -> NodeId {
         let (idx, generation) = if let Some(idx) = self.free_list.pop() {
             let generation = self.generations[idx].saturating_add(1);
             self.generations[idx] = generation;
@@ -266,12 +266,80 @@ impl<B: Backend<f64>> Tree<B> {
             )]
             ((self.nodes.len() - 1) as u32, generation)
         };
-        let id = NodeId::new(idx, generation);
+        NodeId::new(idx, generation)
+    }
+
+    /// Create a node and append it as the last child of `parent` (or as a root if `None`).
+    ///
+    /// The returned [`NodeId`] becomes live immediately, but world-space data
+    /// (`world_transform`, `world_bounds`) and the spatial index are only
+    /// updated on the next call to [`Tree::commit`].
+    pub fn push_child(&mut self, parent: Option<NodeId>, local: LocalNode) -> NodeId {
+        let id = self.alloc_node(local);
         if let Some(p) = parent {
             self.link_parent(id, p);
+        } else {
+            self.roots.push(id);
         }
         self.mark_dirty(id);
         id
+    }
+
+    /// Create a node and insert it at `index` in `parent`'s children (or root list if `None`).
+    ///
+    /// In debug builds, panics if `index > children.len()`.
+    /// The returned [`NodeId`] becomes live immediately, but world-space data
+    /// and the spatial index are only updated on the next call to [`Tree::commit`].
+    pub fn insert_child_at(
+        &mut self,
+        parent: Option<NodeId>,
+        index: usize,
+        local: LocalNode,
+    ) -> NodeId {
+        let id = self.alloc_node(local);
+        if let Some(p) = parent {
+            debug_assert!(
+                index <= self.node(p).children.len(),
+                "insert_child_at: index out of bounds"
+            );
+            self.node_mut(p).children.insert(index, id);
+            self.node_mut(id).parent = Some(p);
+        } else {
+            debug_assert!(
+                index <= self.roots.len(),
+                "insert_child_at: index out of bounds"
+            );
+            self.roots.insert(index, id);
+        }
+        self.mark_dirty(id);
+        id
+    }
+
+    /// Reorder `parent`'s children to match the provided slice.
+    ///
+    /// Only `NodeId`s that are current live children of `parent` are kept; others are ignored.
+    /// Does not create or remove nodes.
+    pub fn set_children(&mut self, parent: Option<NodeId>, children: &[NodeId]) {
+        match parent {
+            Some(p) => {
+                let current = self.node(p).children.clone();
+                let reordered: Vec<NodeId> = children
+                    .iter()
+                    .copied()
+                    .filter(|id| current.contains(id))
+                    .collect();
+                self.node_mut(p).children = reordered;
+            }
+            None => {
+                let current = self.roots.clone();
+                let reordered: Vec<NodeId> = children
+                    .iter()
+                    .copied()
+                    .filter(|id| current.contains(id))
+                    .collect();
+                self.roots = reordered;
+            }
+        }
     }
 
     /// Remove a node (and its subtree) from the tree.
@@ -285,6 +353,8 @@ impl<B: Backend<f64>> Tree<B> {
         self.needs_commit = true;
         if let Some(parent) = self.node(id).parent {
             self.unlink_parent(id, parent);
+        } else {
+            self.roots.retain(|&r| r != id);
         }
         let children = self.node(id).children.clone();
         for child in children {
@@ -301,15 +371,20 @@ impl<B: Backend<f64>> Tree<B> {
     ///
     /// This marks the subtree dirty; world-space transforms/bounds and the
     /// spatial index are updated on the next call to [`Tree::commit`].
+    /// The node is appended as the last child of `new_parent` (or as the last root if `None`).
     pub fn reparent(&mut self, id: NodeId, new_parent: Option<NodeId>) {
         if !self.is_alive(id) {
             return;
         }
         if let Some(parent) = self.node(id).parent {
             self.unlink_parent(id, parent);
+        } else {
+            self.roots.retain(|&r| r != id);
         }
         if let Some(p) = new_parent {
             self.link_parent(id, p);
+        } else {
+            self.roots.push(id);
         }
         self.mark_dirty(id);
         let node = self.node_mut(id);
@@ -323,10 +398,8 @@ impl<B: Backend<f64>> Tree<B> {
     /// Returns `true` when the local value changed. This marks the node as dirty for transform
     /// and index updates and sets [`Tree::needs_commit`] to `true`.
     ///
-    /// - [`Tree::get_or_compute_world_transform`] and [`Tree::get_or_compute_world_bounds`] can
-    ///   compute this node's world data independently of [`Tree::commit`].
-    /// - [`Tree::commit`] is what synchronizes world bounds into the spatial index.
-    /// - Spatial-index-backed queries continue to use the last committed index until commit runs.
+    /// [`Tree::commit`] is what synchronizes world bounds into the spatial index. Spatial-index-
+    /// backed queries continue to use the last committed index until commit runs.
     pub fn set_local_transform(&mut self, id: NodeId, tf: Affine) -> bool {
         let changed = match self.node_opt_mut(id) {
             Some(n) if n.local.local_transform != tf => {
@@ -389,10 +462,8 @@ impl<B: Backend<f64>> Tree<B> {
     /// Returns `true` when the local value changed. This marks the node as dirty for clip and
     /// index updates and sets [`Tree::needs_commit`] to `true`.
     ///
-    /// - [`Tree::get_or_compute_world_transform`] and [`Tree::get_or_compute_world_bounds`] can
-    ///   compute this node's world data independently of [`Tree::commit`].
-    /// - [`Tree::commit`] is what synchronizes world bounds into the spatial index.
-    /// - Spatial-index-backed queries continue to use the last committed index until commit runs.
+    /// [`Tree::commit`] is what synchronizes world bounds into the spatial index. Spatial-index-
+    /// backed queries continue to use the last committed index until commit runs.
     pub fn set_local_clip(&mut self, id: NodeId, clip: Option<RoundedRect>) -> bool {
         let changed = match self.node_opt_mut(id) {
             Some(n) if n.local.local_clip != clip => {
@@ -465,10 +536,8 @@ impl<B: Backend<f64>> Tree<B> {
     /// Returns `true` when the local value changed. This marks the node as dirty for layout and
     /// index updates and sets [`Tree::needs_commit`] to `true`.
     ///
-    /// - [`Tree::get_or_compute_world_transform`] and [`Tree::get_or_compute_world_bounds`] can
-    ///   compute this node's world data independently of [`Tree::commit`].
-    /// - [`Tree::commit`] is what synchronizes world bounds into the spatial index.
-    /// - Spatial-index-backed queries continue to use the last committed index until commit runs.
+    /// [`Tree::commit`] is what synchronizes world bounds into the spatial index. Spatial-index-
+    /// backed queries continue to use the last committed index until commit runs.
     pub fn set_local_bounds(&mut self, id: NodeId, bounds: Rect) -> bool {
         let changed = match self.node_opt_mut(id) {
             Some(n) if n.local.local_bounds != bounds => {
@@ -668,16 +737,14 @@ impl<B: Backend<f64>> Tree<B> {
     /// - `point` is interpreted in world coordinates.
     /// - Nodes must satisfy the [`QueryFilter`] and contain the point within their
     ///   world-space bounds and clip to be eligible.
-    /// - Among candidates, higher `z_index` wins; if `z_index` ties, deeper nodes
-    ///   in the tree win; if that also ties, the newer [`NodeId`] wins.
+    /// - Among candidates, `z_index` is compared at the lowest common ancestor branch;
+    ///   if tied, child index at the LCA wins (later child = higher priority);
+    ///   when one node is an ancestor of the other, the deeper node wins.
     /// - If [`Tree::needs_commit`] is `true`, this still queries the most
     ///   recently committed spatial index and cached world-space data, so the
     ///   result may be stale relative to current local mutations.
-    ///
-    /// This tie-break is intentionally deterministic for now. In the future this
-    /// may be made configurable (for example via a `TieBreakPolicy`).
     pub fn hit_test_point(&self, point: Point, filter: QueryFilter) -> Option<Hit> {
-        let mut best: Option<(NodeId, i32, u16)> = None;
+        let mut best: Option<(NodeId, u16)> = None;
         self.index.visit_point(point.x, point.y, |_, id| {
             // The spatial index provides a coarse world-AABB candidate set. Everything below is
             // precise filtering in local coordinates (bounds/clips) plus deterministic tie-breaks.
@@ -720,22 +787,17 @@ impl<B: Backend<f64>> Tree<B> {
             }
 
             let depth = node.world.depth;
-            let z = node.local.z_index;
             match best {
-                None => best = Some((id, z, depth)),
-                Some((id_best, z_best, depth_best)) => {
-                    if z > z_best
-                        || (z == z_best
-                            && (depth > depth_best
-                                || (depth == depth_best && id_is_newer(id, id_best))))
-                    {
-                        best = Some((id, z, depth));
+                None => best = Some((id, depth)),
+                Some(best_hit) => {
+                    if self.should_replace_hit((id, depth), best_hit) {
+                        best = Some((id, depth));
                     }
                 }
             }
         });
 
-        best.map(|(node, _, _)| Hit {
+        best.map(|(node, _)| Hit {
             node,
             path: self.path_to_root(node),
         })
@@ -747,7 +809,7 @@ impl<B: Backend<f64>> Tree<B> {
     /// The result is ordered deterministically by `z_index`, tree depth, and [`NodeId`]
     /// recency tie-break (`id_is_newer`).
     pub fn hit_test_visual_stack(&self, point: Point, filter: QueryFilter) -> Vec<NodeId> {
-        let mut hits: Vec<(NodeId, i32, u16)> = Vec::new();
+        let mut hits: Vec<(NodeId, u16)> = Vec::new();
 
         self.index.visit_point(point.x, point.y, |_, id| {
             let Some(node) = self.nodes.get(id.idx()).and_then(|slot| slot.as_ref()) else {
@@ -788,31 +850,21 @@ impl<B: Backend<f64>> Tree<B> {
             }
 
             let depth = node.world.depth;
-            let z = node.local.z_index;
-            hits.push((id, z, depth));
+            hits.push((id, depth));
         });
 
-        // Sort by z-index, then depth, then recency.
+        // Sort lowest→highest priority.
         hits.sort_by(|a, b| {
-            let (id_a, z_a, depth_a) = a;
-            let (id_b, z_b, depth_b) = b;
-
-            match z_a.cmp(z_b) {
-                core::cmp::Ordering::Equal => match depth_a.cmp(depth_b) {
-                    core::cmp::Ordering::Equal => {
-                        if id_is_newer(*id_a, *id_b) {
-                            core::cmp::Ordering::Greater
-                        } else {
-                            core::cmp::Ordering::Less
-                        }
-                    }
-                    other => other,
-                },
-                other => other,
+            if self.should_replace_hit(*a, *b) {
+                core::cmp::Ordering::Greater // a wins over b, so a comes later (higher priority last)
+            } else if self.should_replace_hit(*b, *a) {
+                core::cmp::Ordering::Less // b wins over a, so b comes later
+            } else {
+                core::cmp::Ordering::Equal
             }
         });
 
-        hits.into_iter().map(|(id, _, _)| id).collect()
+        hits.into_iter().map(|(id, _)| id).collect()
     }
 
     /// Iterate live nodes whose world-space bounds intersect a world-space rectangle.
@@ -871,11 +923,72 @@ impl<B: Backend<f64>> Tree<B> {
                 filter.matches(node.local.flags)
             })
     }
-}
 
-#[inline]
-fn id_is_newer(a: NodeId, b: NodeId) -> bool {
-    (a.1 > b.1) || (a.1 == b.1 && a.0 > b.0)
+    /// Returns true if hit `a` should replace hit `b` (i.e. `a` has higher priority).
+    ///
+    /// Comparison order:
+    /// 1. `z_index` at the lowest common ancestor branch (higher wins).
+    ///    A node inside a container with `z_index=1` cannot outrank a sibling container
+    ///    with `z_index=2`, regardless of its own `z_index`.
+    /// 2. Child index at the LCA (or root order); later child wins (higher index).
+    /// 3. Depth (ancestor-of case): when one node is an ancestor of the other,
+    ///    the deeper node wins.
+    #[inline]
+    fn should_replace_hit(&self, a: (NodeId, u16), b: (NodeId, u16)) -> bool {
+        let (id_a, depth_a) = a;
+        let (id_b, depth_b) = b;
+
+        let mut cur_a = id_a;
+        let mut cur_b = id_b;
+        let mut d_a = depth_a;
+        let mut d_b = depth_b;
+
+        // Equalize depths by walking up the deeper node.
+        while d_a > d_b {
+            cur_a = self.node(cur_a).parent.expect("non-root must have parent");
+            d_a -= 1;
+        }
+        while d_b > d_a {
+            cur_b = self.node(cur_b).parent.expect("non-root must have parent");
+            d_b -= 1;
+        }
+
+        // Ancestor-of case: deeper node wins.
+        if cur_a == cur_b {
+            return depth_a > depth_b;
+        }
+
+        // Walk up together until parents match (LCA found).
+        loop {
+            let pa = self.node(cur_a).parent;
+            let pb = self.node(cur_b).parent;
+            match (pa, pb) {
+                (Some(pa), Some(pb)) if pa == pb => break,
+                (Some(pa), Some(pb)) => {
+                    cur_a = pa;
+                    cur_b = pb;
+                }
+                _ => break, // different roots; compare at current level
+            }
+        }
+
+        // 1. z_index at LCA branch
+        let z_a = self.node(cur_a).local.z_index;
+        let z_b = self.node(cur_b).local.z_index;
+        if z_a != z_b {
+            return z_a > z_b;
+        }
+
+        // 2. Child index at LCA (or root order)
+        let lca_parent = self.node(cur_a).parent;
+        let siblings: &[NodeId] = match lca_parent {
+            Some(lca) => &self.node(lca).children,
+            None => &self.roots,
+        };
+        let idx_a = siblings.iter().position(|&n| n == cur_a).unwrap_or(0);
+        let idx_b = siblings.iter().position(|&n| n == cur_b).unwrap_or(0);
+        idx_a > idx_b
+    }
 }
 
 impl<B: Backend<f64>> Tree<B> {
@@ -957,170 +1070,6 @@ impl<B: Backend<f64>> Tree<B> {
             return &[];
         }
         &self.node(id).children
-    }
-
-    /// Get the world transform for a live node, computing and caching it if needed.
-    ///
-    /// This returns cached data when the target path is already up to date,
-    /// even if unrelated parts of the tree are dirty. If the node (or an
-    /// ancestor that affects its world transform) is dirty, this computes
-    /// on-demand by composing ancestor local transforms so it reflects
-    /// uncommitted local changes.
-    ///
-    /// This updates cached world values for the target node but does not touch
-    /// the spatial index and does not modify [`Tree::needs_commit`].
-    ///
-    /// Returns `None` if the node ID is stale.
-    pub fn get_or_compute_world_transform(&mut self, id: NodeId) -> Option<Affine> {
-        if !self.is_alive(id) {
-            return None;
-        }
-        if !self.needs_world_transform_recompute(id) {
-            return Some(self.node(id).world.world_transform);
-        }
-        self.compute_world_node(id)?;
-        Some(self.node(id).world.world_transform)
-    }
-
-    /// Get world-space bounds for a node, computing and caching them if needed.
-    ///
-    /// This returns cached data when the target path is already up to date,
-    /// even if unrelated parts of the tree are dirty. If the node (or an
-    /// ancestor that affects its world bounds) is dirty, this computes the
-    /// world transform by walking up the tree, transforms local bounds, and
-    /// applies clips (both local and ancestor) to produce the final
-    /// world-space AABB.
-    ///
-    /// Like [`Tree::get_or_compute_world_transform`], this updates cached world values
-    /// for the target node only. It does not touch the spatial index and does
-    /// not modify [`Tree::needs_commit`].
-    ///
-    /// Returns `None` if the node ID is stale or the node has been removed.
-    ///
-    /// This is useful when you need to know the world bounds immediately after making changes,
-    /// without waiting for the next [`Tree::commit`]. For example, when computing layout constraints
-    /// or checking bounds after moving a node.
-    ///
-    /// # Example
-    /// ```
-    /// use understory_box_tree::{Tree, LocalNode};
-    /// use kurbo::{Rect, Affine, Vec2};
-    ///
-    /// let mut tree = Tree::new();
-    /// let root = tree.insert(
-    ///     None,
-    ///     LocalNode {
-    ///         local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
-    ///         local_transform: Affine::translate(Vec2::new(50.0, 50.0)),
-    ///         ..Default::default()
-    ///     },
-    /// );
-    ///
-    /// // Compute bounds without committing
-    /// let bounds = tree.get_or_compute_world_bounds(root).unwrap();
-    /// assert_eq!(bounds, Rect::new(50.0, 50.0, 150.0, 150.0));
-    /// ```
-    pub fn get_or_compute_world_bounds(&mut self, id: NodeId) -> Option<Rect> {
-        if !self.is_alive(id) {
-            return None;
-        }
-        if !self.needs_world_bounds_recompute(id) {
-            return Some(self.node(id).world.world_bounds);
-        }
-        self.compute_world_node(id)?;
-        Some(self.node(id).world.world_bounds)
-    }
-
-    fn needs_world_transform_recompute(&self, id: NodeId) -> bool {
-        if !self.needs_commit {
-            return false;
-        }
-
-        let mut current = Some(id);
-        let mut is_target = true;
-        while let Some(node_id) = current {
-            let node = self.node(node_id);
-            let needs = if is_target {
-                node.dirty.transform
-            } else {
-                node.dirty.transform || node.dirty.clip
-            };
-            if needs {
-                return true;
-            }
-            current = node.parent;
-            is_target = false;
-        }
-        false
-    }
-
-    fn needs_world_bounds_recompute(&self, id: NodeId) -> bool {
-        if !self.needs_commit {
-            return false;
-        }
-
-        let mut current = Some(id);
-        let mut is_target = true;
-        while let Some(node_id) = current {
-            let node = self.node(node_id);
-            let needs = if is_target {
-                node.dirty.layout || node.dirty.transform || node.dirty.clip
-            } else {
-                node.dirty.transform || node.dirty.clip
-            };
-            if needs {
-                return true;
-            }
-            current = node.parent;
-            is_target = false;
-        }
-        false
-    }
-
-    fn compute_world_node(&mut self, id: NodeId) -> Option<()> {
-        if !self.is_alive(id) {
-            return None;
-        }
-
-        // Walk up to the root, then process root -> node.
-        let path = self.path_to_root(id);
-        let mut parent_tf = Affine::IDENTITY;
-        let mut parent_clip: Option<Rect> = None;
-        let mut depth = 0_u16;
-        let mut world: Option<WorldNode> = None;
-
-        for node_id in path {
-            depth = depth.saturating_add(1);
-            let computed = {
-                let node = self.node(node_id);
-                let effective_local_transform = Self::effective_local_transform(
-                    node.local.local_transform,
-                    parent_tf,
-                    node.pending_world_position,
-                );
-                Self::compute_world_from_parent(
-                    &node.local,
-                    parent_tf,
-                    effective_local_transform,
-                    parent_clip,
-                    depth,
-                )
-            };
-            parent_tf = computed.world_transform;
-            parent_clip = computed.world_clip;
-            if node_id == id {
-                world = Some(computed);
-            }
-        }
-
-        let world = world?;
-        let node = self.node_mut(id);
-        node.world = world;
-        // On-demand world recompute makes world-space values current for this node.
-        // Keep dirty flags intact so `commit` still performs the required spatial-index sync
-        // and descendant propagation when ancestor transform/clip changes are pending.
-
-        Some(())
     }
 
     fn compute_world_from_parent(
@@ -1500,14 +1449,14 @@ mod tests {
         let backend = CountingBackend::new(FlatVec::<f64>::default(), counts.clone());
         let mut tree: Tree<CountingBackend<FlatVec<f64>>> = Tree::with_backend(backend);
 
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
                 ..Default::default()
             },
         );
-        tree.insert(
+        tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 5.0, 5.0),
@@ -1535,7 +1484,7 @@ mod tests {
         let backend = CountingBackend::new(FlatVec::<f64>::default(), counts.clone());
         let mut tree: Tree<CountingBackend<FlatVec<f64>>> = Tree::with_backend(backend);
 
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -1543,7 +1492,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 // Large enough to fully cover the parent's clip even if we nudge it slightly.
@@ -1566,21 +1515,21 @@ mod tests {
     #[test]
     fn commit_does_not_drop_dirty_descendant_when_ancestor_layout_only() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 ..Default::default()
             },
         );
-        let parent = tree.insert(
+        let parent = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(parent),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -1603,7 +1552,7 @@ mod tests {
     #[test]
     fn hit_test_uses_last_committed_state_while_dirty() {
         let mut tree = Tree::new();
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -1638,7 +1587,7 @@ mod tests {
     #[test]
     fn spatial_queries_use_last_committed_state_while_dirty() {
         let mut tree = Tree::new();
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -1683,7 +1632,7 @@ mod tests {
     #[test]
     fn world_accessors_return_last_committed_values_while_dirty() {
         let mut tree = Tree::new();
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -1716,14 +1665,14 @@ mod tests {
     #[test]
     fn insert_and_hit_test() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
                 ..Default::default()
             },
         );
-        let _a = tree.insert(
+        let _a = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(10.0, 10.0, 60.0, 60.0),
@@ -1731,7 +1680,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let b = tree.insert(
+        let b = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
@@ -1755,14 +1704,14 @@ mod tests {
     #[test]
     fn transform_and_damage() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 ..Default::default()
             },
         );
-        let n = tree.insert(
+        let n = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -1778,14 +1727,14 @@ mod tests {
     #[test]
     fn noop_commit_returns_default_and_queries_unchanged() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
                 ..Default::default()
             },
         );
-        let top = tree.insert(
+        let top = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
@@ -1814,14 +1763,14 @@ mod tests {
     #[test]
     fn set_z_index_does_not_require_commit() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
                 ..Default::default()
             },
         );
-        let a = tree.insert(
+        let a = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
@@ -1829,7 +1778,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let b = tree.insert(
+        let b = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
@@ -1858,7 +1807,7 @@ mod tests {
     #[test]
     fn set_flags_does_not_require_commit() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -1866,7 +1815,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let n = tree.insert(
+        let n = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
@@ -1898,7 +1847,7 @@ mod tests {
     #[test]
     fn set_world_position_simple() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -1919,7 +1868,7 @@ mod tests {
     #[test]
     fn set_world_position_with_parent_preserves_authored_local_transform() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -1927,7 +1876,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
@@ -1954,7 +1903,7 @@ mod tests {
     #[test]
     fn set_world_position_preserves_rotation() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -1987,7 +1936,7 @@ mod tests {
     #[test]
     fn set_world_position_with_scaled_parent() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -1995,7 +1944,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
@@ -2019,7 +1968,7 @@ mod tests {
     #[test]
     fn set_world_position_with_rotated_parent() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -2027,7 +1976,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -2052,7 +2001,7 @@ mod tests {
     #[test]
     fn set_world_position_stale_id() {
         let mut tree = Tree::new();
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -2070,14 +2019,14 @@ mod tests {
     #[test]
     fn set_world_position_overrides_until_cleared() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -2113,14 +2062,14 @@ mod tests {
     #[test]
     fn set_world_position_moves_descendants() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -2128,7 +2077,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let grandchild = tree.insert(
+        let grandchild = tree.push_child(
             Some(child),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -2156,7 +2105,7 @@ mod tests {
     #[test]
     fn set_world_position_same_value_does_not_dirty_tree_or_damage_commit() {
         let mut tree = Tree::new();
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -2190,7 +2139,7 @@ mod tests {
     #[test]
     fn inside_aabb_but_outside_local_bounds() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -2198,7 +2147,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        tree.insert(
+        tree.push_child(
             Some(root),
             LocalNode {
                 // In world space, this rectangle is rotated by 45 degrees due to the parent's
@@ -2219,7 +2168,7 @@ mod tests {
     #[test]
     fn child_clip_intersects_with_parent_clip() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2230,7 +2179,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(80.0, 80.0, 180.0, 180.0),
@@ -2255,7 +2204,7 @@ mod tests {
     #[test]
     fn inherits_parent_clip() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2266,7 +2215,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(80.0, 80.0, 180.0, 180.0),
@@ -2287,7 +2236,7 @@ mod tests {
     #[test]
     fn clipped_local_clip_is_none_when_no_local_clip_even_with_parent_clip() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2298,7 +2247,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2313,7 +2262,7 @@ mod tests {
     #[test]
     fn clipped_local_clip_preserves_only_intact_corners() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2324,7 +2273,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2349,7 +2298,7 @@ mod tests {
     #[test]
     fn clipped_local_clip_tolerance_preserves_almost_aligned_corners() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2360,7 +2309,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2411,7 +2360,7 @@ mod tests {
     #[test]
     fn clipped_local_clip_remains_available_while_dirty() {
         let mut tree = Tree::new();
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -2433,7 +2382,7 @@ mod tests {
     #[test]
     fn clipped_local_clip_uses_inverse_projected_clip_bbox_for_rotated_ancestor() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2445,7 +2394,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(100.0, 100.0, 150.0, 150.0),
@@ -2465,7 +2414,7 @@ mod tests {
     #[test]
     fn ancestor_rounded_rect_clip_blocks_hit() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -2476,7 +2425,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -2501,14 +2450,14 @@ mod tests {
     fn liveness_insert_remove_reuse() {
         let mut tree = Tree::new();
         // Insert a root, then a child.
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let a = tree.insert(
+        let a = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -2524,7 +2473,7 @@ mod tests {
         assert!(!tree.is_alive(a));
 
         // Insert new child; might reuse slot but generation bumps.
-        let b = tree.insert(
+        let b = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -2545,7 +2494,7 @@ mod tests {
 
         // Use an R-tree backend and verify basic hit-testing still works.
         let mut tree: Tree<RTreeF64<NodeId>> = Tree::with_backend(RTreeF64::<NodeId>::default());
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -2563,7 +2512,7 @@ mod tests {
 
         // Use a BVH backend and verify basic hit-testing still works.
         let mut tree: Tree<BvhF64> = Tree::with_backend(BvhF64::default());
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -2581,7 +2530,7 @@ mod tests {
 
         // Use a grid backend and verify basic hit-testing still works.
         let mut tree: Tree<GridF64> = Tree::with_backend(GridF64::new(50.0));
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -2594,32 +2543,20 @@ mod tests {
     }
 
     #[test]
-    fn newer_than_semantics() {
-        // Construct synthetic NodeId pairs and verify newer ordering.
-        let old = NodeId::new(10, 1);
-        let newer_same_slot = NodeId::new(10, 2);
-        let same_gen_higher_slot = NodeId::new(11, 2);
-        let same_gen_lower_slot = NodeId::new(9, 2);
-
-        // Private helper is in scope within the module.
-        assert!(id_is_newer(newer_same_slot, old));
-        assert!(id_is_newer(same_gen_higher_slot, newer_same_slot));
-        assert!(!id_is_newer(same_gen_lower_slot, newer_same_slot));
-    }
-
-    #[test]
-    fn hit_equal_z_newer_wins() {
+    fn child_index_breaks_tie_when_z_equal() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        // Root is a container only — not pickable so it won't appear in hit results.
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                flags: NodeFlags::VISIBLE,
                 ..Default::default()
             },
         );
 
-        // Two overlapping children at the same z.
-        let a = tree.insert(
+        // Two overlapping children at the same z; later child (higher index) should win.
+        let a = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
@@ -2627,7 +2564,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let b = tree.insert(
+        let b = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
@@ -2637,111 +2574,30 @@ mod tests {
         );
         let _ = tree.commit();
 
-        // Sanity: with equal z and equal depth, the newer of (a, b) should win; typically b is newer.
-        let hit1 = tree
+        // b is inserted after a, so b has higher child index and should win.
+        let hit = tree
             .hit_test_point(
                 Point::new(60.0, 60.0),
                 QueryFilter::new().visible().pickable(),
             )
             .unwrap();
-        let expected1 = if id_is_newer(b, a) { b } else { a };
-        assert_eq!(hit1.node, expected1);
-
-        // Make a stale by removing it, then insert c reusing a's slot (generation++),
-        // still equal z and overlapping; c is strictly newer than b by generation.
-        tree.remove(a);
-        let c = tree.insert(
-            Some(root),
-            LocalNode {
-                local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
-                z_index: 5,
-                ..Default::default()
-            },
-        );
-        let _ = tree.commit();
-        assert!(id_is_newer(c, b));
-
-        let hit2 = tree
-            .hit_test_point(
-                Point::new(60.0, 60.0),
-                QueryFilter::new().visible().pickable(),
-            )
-            .unwrap();
-        assert_eq!(hit2.node, c, "newer id should win on equal z and depth");
-    }
-
-    #[test]
-    fn hit_test_visual_stack_returns_all_hits() {
-        let mut tree = Tree::new();
-        let root = tree.insert(
-            None,
-            LocalNode {
-                local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
-                ..Default::default()
-            },
+        assert_eq!(
+            hit.node, b,
+            "later child (higher index) should win on equal z"
         );
 
-        let back = tree.insert(
-            Some(root),
-            LocalNode {
-                local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
-                z_index: 0,
-                ..Default::default()
-            },
+        // Verify all hits are ordered low-to-high priority: [a, b]
+        let all_hits = tree.hit_test_visual_stack(
+            Point::new(60.0, 60.0),
+            QueryFilter::new().visible().pickable(),
         );
-        let front = tree.insert(
-            Some(root),
-            LocalNode {
-                local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
-                z_index: 10,
-                ..Default::default()
-            },
-        );
-        let _ = tree.commit();
-
-        let hits = tree.hit_test_visual_stack(Point::new(60.0, 60.0), QueryFilter::new());
-        assert_eq!(hits, vec![root, back, front]);
-    }
-
-    #[test]
-    fn hit_test_visual_stack_tiebreak_matches_existing_semantics() {
-        let mut tree = Tree::new();
-        let root = tree.insert(
-            None,
-            LocalNode {
-                local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
-                ..Default::default()
-            },
-        );
-
-        let a = tree.insert(
-            Some(root),
-            LocalNode {
-                local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
-                z_index: 5,
-                ..Default::default()
-            },
-        );
-        let b = tree.insert(
-            Some(root),
-            LocalNode {
-                local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),
-                z_index: 5,
-                ..Default::default()
-            },
-        );
-        let _ = tree.commit();
-
-        let expected_front = if id_is_newer(a, b) { b } else { a };
-        let expected_back = if id_is_newer(a, b) { a } else { b };
-        let hits = tree.hit_test_visual_stack(Point::new(60.0, 60.0), QueryFilter::new());
-        assert_eq!(hits, vec![root, expected_front, expected_back]);
+        assert_eq!(all_hits, vec![a, b]);
     }
 
     #[test]
     fn z_index_accessor_respects_liveness() {
         let mut tree = Tree::new();
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -2752,7 +2608,7 @@ mod tests {
         assert_eq!(tree.z_index(node), Some(7));
         tree.remove(node);
         assert_eq!(tree.z_index(node), None, "stale ids must return None");
-        let new_node = tree.insert(
+        let new_node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -2761,13 +2617,13 @@ mod tests {
             },
         );
         assert_eq!(tree.z_index(new_node), Some(3));
-        assert!(id_is_newer(new_node, node));
+        assert!(tree.is_alive(new_node));
     }
 
     #[test]
     fn deeper_node_wins_over_ancestor_at_equal_z() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2775,7 +2631,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 160.0, 160.0),
@@ -2783,7 +2639,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let grandchild = tree.insert(
+        let grandchild = tree.push_child(
             Some(child),
             LocalNode {
                 local_bounds: Rect::new(80.0, 80.0, 120.0, 120.0),
@@ -2806,9 +2662,9 @@ mod tests {
     }
 
     #[test]
-    fn id_tiebreak_only_used_when_depth_and_z_equal() {
+    fn child_index_tiebreaker_when_depth_and_z_equal() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2816,8 +2672,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        // Two overlapping children at the same depth and z.
-        let a = tree.insert(
+        // Two overlapping children at the same depth and z; later child wins.
+        let a = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 160.0, 160.0),
@@ -2825,7 +2681,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let b = tree.insert(
+        let b = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(40.0, 40.0, 160.0, 160.0),
@@ -2835,31 +2691,47 @@ mod tests {
         );
         let _ = tree.commit();
 
-        // Both overlap the point; whichever is newer by NodeId wins when depth and z are equal.
+        // b is appended after a, so b has higher child index and wins.
         let hit = tree
             .hit_test_point(
                 Point::new(100.0, 100.0),
                 QueryFilter::new().visible().pickable(),
             )
             .unwrap();
-        let expected = if id_is_newer(b, a) { b } else { a };
-        assert_eq!(hit.node, expected);
+        assert_eq!(
+            hit.node, b,
+            "later child (higher child index) wins at equal depth and z"
+        );
+        assert_eq!(
+            hit.node, b,
+            "later child (higher child index) wins at equal depth and z"
+        );
         // Path still includes root then the chosen child.
         assert_eq!(hit.path.first().copied(), Some(root));
-        assert_eq!(hit.path.last().copied(), Some(expected));
+        assert_eq!(hit.path.last().copied(), Some(b));
+
+        // Reorder so a is last: now a should win.
+        tree.set_children(Some(root), &[b, a]);
+        let hit2 = tree
+            .hit_test_point(
+                Point::new(100.0, 100.0),
+                QueryFilter::new().visible().pickable(),
+            )
+            .unwrap();
+        assert_eq!(hit2.node, a, "after reorder, a is last child so a wins");
     }
 
     #[test]
     fn update_bounds_and_damage_and_hit() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 ..Default::default()
             },
         );
-        let n = tree.insert(
+        let n = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -2896,14 +2768,14 @@ mod tests {
     #[test]
     fn parent_of_respects_liveness_and_roots() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -2919,7 +2791,7 @@ mod tests {
     #[test]
     fn query_filter_focusable_only() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2927,7 +2799,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let focusable_child = tree.insert(
+        let focusable_child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(10.0, 10.0, 60.0, 60.0),
@@ -2935,7 +2807,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let _non_focusable_child = tree.insert(
+        let _non_focusable_child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(70.0, 10.0, 120.0, 60.0),
@@ -2983,7 +2855,7 @@ mod tests {
     #[test]
     fn query_filter_pickable_only() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -2991,7 +2863,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let pickable_child = tree.insert(
+        let pickable_child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(10.0, 10.0, 60.0, 60.0),
@@ -2999,7 +2871,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let non_pickable_child = tree.insert(
+        let non_pickable_child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(70.0, 10.0, 120.0, 60.0),
@@ -3060,7 +2932,7 @@ mod tests {
     #[test]
     fn world_transform_and_bounds_match_updates() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -3068,7 +2940,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -3100,7 +2972,7 @@ mod tests {
     #[test]
     fn world_transform_and_bounds_respect_liveness() {
         let mut tree = Tree::new();
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -3122,7 +2994,7 @@ mod tests {
     #[test]
     fn local_and_world_accessors_observe_commit_boundary() {
         let mut tree = Tree::new();
-        let node = tree.insert(
+        let node = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -3167,7 +3039,7 @@ mod tests {
     #[test]
     fn set_local_methods_return_changed_flag() {
         let mut tree = Tree::new();
-        let node = tree.insert(None, LocalNode::default());
+        let node = tree.push_child(None, LocalNode::default());
         let _ = tree.commit();
 
         let tf = Affine::translate(Vec2::new(5.0, 0.0));
@@ -3190,35 +3062,35 @@ mod tests {
     fn depth_first_traversal() {
         let mut tree = Tree::new();
         // Build tree: root -> [a -> [c, d], b]
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let a = tree.insert(
+        let a = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let b = tree.insert(
+        let b = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let c = tree.insert(
+        let c = tree.push_child(
             Some(a),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let d = tree.insert(
+        let d = tree.push_child(
             Some(a),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -3247,35 +3119,35 @@ mod tests {
     fn reverse_depth_first_traversal() {
         let mut tree = Tree::new();
         // Build tree: root -> [a -> [c, d], b]
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let a = tree.insert(
+        let a = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let b = tree.insert(
+        let b = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let c = tree.insert(
+        let c = tree.push_child(
             Some(a),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let d = tree.insert(
+        let d = tree.push_child(
             Some(a),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -3303,21 +3175,21 @@ mod tests {
     #[test]
     fn children_of_accessor() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let a = tree.insert(
+        let a = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let b = tree.insert(
+        let b = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -3341,14 +3213,14 @@ mod tests {
     #[test]
     fn traversal_respects_liveness() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let child = tree.insert(
+        let child = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -3370,28 +3242,28 @@ mod tests {
     fn depth_changes_during_traversal() {
         let mut tree = Tree::new();
         // Build tree: root -> a -> b -> c
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let a = tree.insert(
+        let a = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let b = tree.insert(
+        let b = tree.push_child(
             Some(a),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
                 ..Default::default()
             },
         );
-        let c = tree.insert(
+        let c = tree.push_child(
             Some(b),
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),

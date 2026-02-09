@@ -14,14 +14,14 @@ use understory_box_tree::{LocalNode, QueryFilter, Tree};
 fn main() {
     // Build a small tree
     let mut tree = Tree::new();
-    let root = tree.insert(
+    let root = tree.push_child(
         None,
         LocalNode {
             local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
             ..Default::default()
         },
     );
-    let a = tree.insert(
+    let a = tree.push_child(
         Some(root),
         LocalNode {
             local_bounds: Rect::new(10.0, 10.0, 60.0, 60.0),
@@ -29,7 +29,7 @@ fn main() {
             ..Default::default()
         },
     );
-    let b = tree.insert(
+    let b = tree.push_child(
         Some(root),
         LocalNode {
             local_bounds: Rect::new(40.0, 40.0, 120.0, 120.0),

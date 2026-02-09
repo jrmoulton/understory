@@ -47,9 +47,11 @@ This crate does not perform layout (measurement or arrangement) or apply layout 
 Upstream code is expected to compute positions and sizes using whatever layout system you choose and then update this tree with the resulting world-space boxes, transforms, optional clips, and z-order.
 Think of this as a scene and spatial index, not a layout system.
 
-This crate also does not model stacking contexts, opacity, or blend modes. It provides a single
-global z ordering (`z_index`) over boxes plus hit-testing and visibility queries. Higher-level
-code is expected to introduce groups, stacking semantics, and paint order if needed.
+This crate also does not model stacking contexts, opacity, or blend modes. It provides a local
+z ordering (`z_index`) hint for sibling ordering plus hit-testing and visibility queries.
+At hit-test time `z_index` is compared at the lowest common ancestor branch, so a node nested
+inside a container with `z_index=1` cannot outrank a sibling container with `z_index=2`.
+Higher-level code is expected to introduce groups, stacking semantics, and paint order if needed.
 
 ## Integration with Understory Index
 
@@ -77,14 +79,17 @@ for details.
   See [`NodeFlags::VISIBLE`], [`NodeFlags::PICKABLE`], and [`NodeFlags::FOCUSABLE`].
 
 Key operations:
-- [`Tree::insert`](Tree::insert) → [`NodeId`]
+- [`Tree::push_child`](Tree::push_child) → [`NodeId`] (append as last child)
+- [`Tree::insert_child_at`](Tree::insert_child_at) → [`NodeId`] (insert at specific index)
+- [`Tree::set_children`](Tree::set_children) reorders a node's children list.
 - [`Tree::set_local_transform`](Tree::set_local_transform) / [`Tree::set_local_clip`](Tree::set_local_clip) /
-  [`Tree::set_local_bounds`](Tree::set_local_bounds) / [`Tree::set_flags`](Tree::set_flags)
+  [`Tree::set_local_bounds`](Tree::set_local_bounds) / [`Tree::set_flags`](Tree::set_flags) /
+  [`Tree::set_z_index`](Tree::set_z_index)
 - [`Tree::commit`](Tree::commit) → damage summary; updates world data and the spatial index.
 - [`Tree::hit_test_point`](Tree::hit_test_point),
   [`Tree::hit_test_visual_stack`](Tree::hit_test_visual_stack), and
   [`Tree::intersect_rect`](Tree::intersect_rect).
-- [`Tree::z_index`](Tree::z_index) exposes the stacking order of a live [`NodeId`].
+- [`Tree::z_index`](Tree::z_index) exposes the sibling z-order of a live [`NodeId`].
 - [`Tree::parent_of`](Tree::parent_of) returns the parent of a live [`NodeId`].
 - [`Tree::flags`](Tree::flags) returns the [`NodeFlags`] of a live [`NodeId`].
 - [`Tree::world_transform`](Tree::world_transform) / [`Tree::world_bounds`](Tree::world_bounds)
@@ -95,10 +100,6 @@ Key operations:
 - [`Tree::clipped_local_clip`](Tree::clipped_local_clip) returns the node's own local clip, if
   any, after intersecting it with the committed ancestor clip AABB projected into local space.
   Nodes without a local clip always return `None`.
-- [`Tree::get_or_compute_world_transform`](Tree::get_or_compute_world_transform) and
-  [`Tree::get_or_compute_world_bounds`](Tree::get_or_compute_world_bounds) return cached world
-  values when the node's path is clean (even if unrelated nodes are dirty), otherwise
-  compute+cache on-demand without touching the spatial index or [`Tree::needs_commit`].
 - [`Tree::children_of`](Tree::children_of) returns the children of a live [`NodeId`].
 - [`Tree::next_depth_first`](Tree::next_depth_first) and [`Tree::prev_depth_first`](Tree::prev_depth_first) provide depth-first tree traversal.
 - [`Tree::set_world_position`](Tree::set_world_position) sets a node's world-space position

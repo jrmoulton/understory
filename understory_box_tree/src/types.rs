@@ -17,13 +17,6 @@ use kurbo::{Affine, Rect, RoundedRect};
 /// - On remove, the slot is freed; any existing `NodeId` that pointed to that slot is now stale.
 /// - On reuse of a freed slot, its generation is incremented, producing a new, distinct `NodeId`.
 ///
-/// ### Newer
-///
-/// A `NodeId` is considered newer than another when it has a higher generation.
-/// If generations are equal, the one with the higher slot index is considered newer.
-/// This total order is used only for deterministic tie-breaks in
-/// [hit testing](crate::Tree::hit_test_point).
-///
 /// ### Liveness
 ///
 /// Use [`Tree::is_alive`](crate::Tree::is_alive) to check whether a `NodeId` still refers to a live node.
@@ -97,13 +90,12 @@ pub struct LocalNode {
     /// - Points outside `local_clip` (once transformed) cannot hit this node or any descendant.
     ///   Backends may still apply more precise clipping during rendering.
     pub local_clip: Option<RoundedRect>,
-    /// The node's z-order within the [`Tree`](crate::Tree).
+    /// The node's z-order hint for sibling ordering.
     ///
-    /// This does not model stacking contexts.
-    ///
-    /// - Nodes with higher values are drawn on top of nodes with lower values.
-    /// - Hit testing compares `z_index` when nodes within the tree overlap;
-    ///   depth in the tree and insertion order are used as secondary tie-breakers.
+    /// At hit-test time, `z_index` is compared at the lowest common ancestor branch:
+    /// a node inside a container with `z_index=1` cannot outrank a sibling container
+    /// with `z_index=2`, regardless of its own `z_index`. Default `0`.
+    /// Negative values place a node behind the default; positive values place it in front.
     pub z_index: i32,
     /// Visibility and interaction flags.
     ///

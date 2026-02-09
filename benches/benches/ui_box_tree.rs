@@ -127,7 +127,7 @@ fn build_subtree_from_dump<B: Backend<f64>>(
         stats.nonidentity_transforms += 1;
     }
 
-    let id = tree.insert(
+    let id = tree.push_child(
         parent,
         LocalNode {
             local_bounds: node.local_bounds.to_rect(),
@@ -407,7 +407,7 @@ fn insert<B: Backend<f64>>(
         stats.nonidentity_transforms += 1;
     }
 
-    let id = tree.insert(
+    let id = tree.push_child(
         parent,
         LocalNode {
             local_bounds,

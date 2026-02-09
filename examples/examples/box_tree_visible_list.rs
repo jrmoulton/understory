@@ -14,7 +14,7 @@ const WIDTH: f64 = 200.0;
 
 fn main() {
     let mut tree = Tree::new();
-    let root = tree.insert(
+    let root = tree.push_child(
         None,
         LocalNode {
             local_bounds: Rect::new(0.0, 0.0, WIDTH, 100000.0),
@@ -26,7 +26,7 @@ fn main() {
     let mut ids = Vec::with_capacity(rows);
     for i in 0..rows {
         let y0 = i as f64 * ROW_H;
-        let node = tree.insert(
+        let node = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(0.0, y0, WIDTH, y0 + ROW_H),
