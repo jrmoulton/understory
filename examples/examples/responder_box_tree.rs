@@ -30,7 +30,7 @@ fn main() {
         z_index: 0,
         flags: NodeFlags::VISIBLE | NodeFlags::PICKABLE,
     };
-    let root = bt.insert(None, root_local);
+    let root = bt.push_child(None, root_local);
 
     // Track a simple adjacency for printing (NodeId → children), and attach
     // human-friendly labels + geometry for clarity when printing.
@@ -39,7 +39,7 @@ fn main() {
     info.insert(root, ("root".into(), Rect::new(0.0, 0.0, 400.0, 400.0), 0));
 
     // Child A: behind (z=0), at (50,50)-(150,150)
-    let child_a = bt.insert(
+    let child_a = bt.push_child(
         Some(root),
         LocalNode {
             local_bounds: Rect::new(50.0, 50.0, 150.0, 150.0),
@@ -54,7 +54,7 @@ fn main() {
     );
 
     // Child B: on top (z=5), overlapping A: (100,100)-(200,200)
-    let child_b = bt.insert(
+    let child_b = bt.push_child(
         Some(root),
         LocalNode {
             local_bounds: Rect::new(100.0, 100.0, 200.0, 200.0),

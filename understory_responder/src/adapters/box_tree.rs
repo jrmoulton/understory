@@ -212,7 +212,7 @@ pub mod navigation {
             let mut tree = Tree::new();
 
             // Build tree: root(visible) -> [a(hidden), b(visible) -> c(visible)]
-            let root = tree.insert(
+            let root = tree.push_child(
                 None,
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -220,7 +220,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let _a = tree.insert(
+            let _a = tree.push_child(
                 Some(root),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -228,7 +228,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let b = tree.insert(
+            let b = tree.push_child(
                 Some(root),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -236,7 +236,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let c = tree.insert(
+            let c = tree.push_child(
                 Some(b),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -275,7 +275,7 @@ pub mod navigation {
             let mut tree = Tree::new();
 
             // Build tree where only some nodes are pickable
-            let root = tree.insert(
+            let root = tree.push_child(
                 None,
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -283,7 +283,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let _a = tree.insert(
+            let _a = tree.push_child(
                 Some(root),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -291,7 +291,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let b = tree.insert(
+            let b = tree.push_child(
                 Some(root),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -318,7 +318,7 @@ pub mod navigation {
             let mut tree = Tree::new();
 
             // Build tree with no pickable nodes
-            let root = tree.insert(
+            let root = tree.push_child(
                 None,
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -326,7 +326,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let a = tree.insert(
+            let a = tree.push_child(
                 Some(root),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -350,7 +350,7 @@ pub mod navigation {
             let mut tree = Tree::new();
 
             // Build tree: root -> [visible_child, hidden_child]
-            let root = tree.insert(
+            let root = tree.push_child(
                 None,
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -358,7 +358,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let visible_child = tree.insert(
+            let visible_child = tree.push_child(
                 Some(root),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -366,7 +366,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let _hidden_child = tree.insert(
+            let _hidden_child = tree.push_child(
                 Some(root),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -392,7 +392,7 @@ pub mod navigation {
         fn filtered_traversal_respects_liveness() {
             let mut tree = Tree::new();
 
-            let root = tree.insert(
+            let root = tree.push_child(
                 None,
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -400,7 +400,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let child = tree.insert(
+            let child = tree.push_child(
                 Some(root),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -428,7 +428,7 @@ pub mod navigation {
             let mut tree = Tree::new();
 
             // Build two separate subtrees with mixed visibility
-            let root1 = tree.insert(
+            let root1 = tree.push_child(
                 None,
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -436,7 +436,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let _child1_hidden = tree.insert(
+            let _child1_hidden = tree.push_child(
                 Some(root1),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -444,7 +444,7 @@ pub mod navigation {
                     ..Default::default()
                 },
             );
-            let child1_visible = tree.insert(
+            let child1_visible = tree.push_child(
                 Some(root1),
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -453,7 +453,7 @@ pub mod navigation {
                 },
             );
 
-            let _root2 = tree.insert(
+            let _root2 = tree.push_child(
                 None,
                 LocalNode {
                     local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),

@@ -18,7 +18,7 @@
 //!
 //! // Build a tiny box tree: root with a single focusable child.
 //! let mut tree = Tree::new();
-//! let root = tree.insert(
+//! let root = tree.push_child(
 //!     None,
 //!     LocalNode {
 //!         local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -26,7 +26,7 @@
 //!         ..LocalNode::default()
 //!     },
 //! );
-//! let button = tree.insert(
+//! let button = tree.push_child(
 //!     Some(root),
 //!     LocalNode {
 //!         local_bounds: Rect::new(20.0, 20.0, 80.0, 60.0),
@@ -150,7 +150,7 @@ mod tests {
         let mut tree = Tree::new();
 
         // Root: visible but not focusable.
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 flags: NodeFlags::VISIBLE,
@@ -158,7 +158,7 @@ mod tests {
             },
         );
         // Child A: visible + focusable.
-        let a = tree.insert(
+        let a = tree.push_child(
             Some(root),
             LocalNode {
                 flags: NodeFlags::VISIBLE | NodeFlags::FOCUSABLE,
@@ -166,7 +166,7 @@ mod tests {
             },
         );
         // Child B: hidden.
-        let _b = tree.insert(
+        let _b = tree.push_child(
             Some(root),
             LocalNode {
                 flags: NodeFlags::empty(),
@@ -188,14 +188,14 @@ mod tests {
     #[test]
     fn respects_custom_focus_props() {
         let mut tree = Tree::new();
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 flags: NodeFlags::VISIBLE | NodeFlags::FOCUSABLE,
                 ..LocalNode::default()
             },
         );
-        let disabled_child = tree.insert(
+        let disabled_child = tree.push_child(
             Some(root),
             LocalNode {
                 flags: NodeFlags::VISIBLE | NodeFlags::FOCUSABLE,
@@ -238,7 +238,7 @@ mod tests {
         let mut tree = Tree::new();
 
         // Root is visible but not focusable; children are visible + focusable.
-        let root = tree.insert(
+        let root = tree.push_child(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -246,7 +246,7 @@ mod tests {
                 ..LocalNode::default()
             },
         );
-        let left = tree.insert(
+        let left = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(10.0, 10.0, 40.0, 40.0),
@@ -254,7 +254,7 @@ mod tests {
                 ..LocalNode::default()
             },
         );
-        let right = tree.insert(
+        let right = tree.push_child(
             Some(root),
             LocalNode {
                 local_bounds: Rect::new(80.0, 10.0, 110.0, 40.0),

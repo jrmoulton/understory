@@ -42,7 +42,7 @@ fn main() {
     // Build a small box tree with two children having different shapes.
     let mut tree = Tree::new();
 
-    let root = tree.insert(
+    let root = tree.push_child(
         None,
         LocalNode {
             local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -53,7 +53,7 @@ fn main() {
 
     // Node A: axis-aligned rect.
     let rect = Rect::new(20.0, 40.0, 120.0, 140.0);
-    let node_a = tree.insert(
+    let node_a = tree.push_child(
         Some(root),
         LocalNode {
             local_bounds: rect,
@@ -64,7 +64,7 @@ fn main() {
 
     // Node B: circle translated to the right, same AABB size for illustration.
     let circle = Circle::new((0.0, 0.0), 40.0);
-    let node_b = tree.insert(
+    let node_b = tree.push_child(
         Some(root),
         LocalNode {
             local_bounds: Rect::new(140.0, 40.0, 220.0, 140.0),
