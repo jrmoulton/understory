@@ -81,7 +81,9 @@ Key operations:
 - [`Tree::set_local_transform`](Tree::set_local_transform) / [`Tree::set_local_clip`](Tree::set_local_clip) /
   [`Tree::set_local_bounds`](Tree::set_local_bounds) / [`Tree::set_flags`](Tree::set_flags)
 - [`Tree::commit`](Tree::commit) → damage summary; updates world data and the spatial index.
-- [`Tree::hit_test_point`](Tree::hit_test_point) and [`Tree::intersect_rect`](Tree::intersect_rect).
+- [`Tree::hit_test_point`](Tree::hit_test_point),
+  [`Tree::hit_test_visual_stack`](Tree::hit_test_visual_stack), and
+  [`Tree::intersect_rect`](Tree::intersect_rect).
 - [`Tree::z_index`](Tree::z_index) exposes the stacking order of a live [`NodeId`].
 - [`Tree::parent_of`](Tree::parent_of) returns the parent of a live [`NodeId`].
 - [`Tree::flags`](Tree::flags) returns the [`NodeFlags`] of a live [`NodeId`].
@@ -90,14 +92,27 @@ Key operations:
 - [`Tree::local_transform`](Tree::local_transform) / [`Tree::local_bounds`](Tree::local_bounds) /
   [`Tree::local_clip`](Tree::local_clip) expose the node's current local geometry state for a
   live [`NodeId`].
+- [`Tree::clipped_local_clip`](Tree::clipped_local_clip) returns the node's own local clip, if
+  any, after intersecting it with the committed ancestor clip AABB projected into local space.
+  Nodes without a local clip always return `None`.
+- [`Tree::get_or_compute_world_transform`](Tree::get_or_compute_world_transform) and
+  [`Tree::get_or_compute_world_bounds`](Tree::get_or_compute_world_bounds) return cached world
+  values when the node's path is clean (even if unrelated nodes are dirty), otherwise
+  compute+cache on-demand without touching the spatial index or [`Tree::needs_commit`].
 - [`Tree::children_of`](Tree::children_of) returns the children of a live [`NodeId`].
 - [`Tree::next_depth_first`](Tree::next_depth_first) and [`Tree::prev_depth_first`](Tree::prev_depth_first) provide depth-first tree traversal.
+- [`Tree::set_world_position`](Tree::set_world_position) sets a node's world-space position
+  directly, useful for dragging nodes to follow the cursor; descendants move with it.
 
 ## Damage and debugging notes
 
 - [`Tree::commit`] batches adds/updates/removals and produces coarse damage (added/removed AABBs and
   old/new pairs for moved nodes). The reported rectangles may overlap and are not a minimal cover,
   but are sufficient to bound a paint traversal in most UIs.
+- Local node state is updated immediately. After changing local bounds, transforms, clips, or
+  tree structure, cached world-space data and spatial-query results remain at their last
+  committed values until the next [`Tree::commit`]. If you need up-to-date world information,
+  run or wait for that commit first.
 - World AABBs are loose under rotation/shear and rounded-rect clips are approximated by
   their axis-aligned bounds for acceleration; precise hit-filtering is applied where cheap.
 
