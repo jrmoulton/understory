@@ -326,8 +326,9 @@ impl<B: Backend<f64>> Tree<B> {
 
     /// Update local transform.
     ///
-    /// This dirties the tree. The changes are propagated on the next call to [`Tree::commit`].
-    pub fn set_local_transform(&mut self, id: NodeId, tf: Affine) {
+    /// Returns `true` when the local value changed. This dirties the tree, and
+    /// the changes are propagated on the next call to [`Tree::commit`].
+    pub fn set_local_transform(&mut self, id: NodeId, tf: Affine) -> bool {
         let changed = match self.node_opt_mut(id) {
             Some(n) if n.local.local_transform != tf => {
                 n.local.local_transform = tf;
@@ -340,12 +341,14 @@ impl<B: Backend<f64>> Tree<B> {
         if changed {
             self.mark_dirty(id);
         }
+        changed
     }
 
     /// Update local clip.
     ///
-    /// This dirties the tree. The changes are propagated on the next call to [`Tree::commit`].
-    pub fn set_local_clip(&mut self, id: NodeId, clip: Option<RoundedRect>) {
+    /// Returns `true` when the local value changed. This dirties the tree, and
+    /// the changes are propagated on the next call to [`Tree::commit`].
+    pub fn set_local_clip(&mut self, id: NodeId, clip: Option<RoundedRect>) -> bool {
         let changed = match self.node_opt_mut(id) {
             Some(n) if n.local.local_clip != clip => {
                 n.local.local_clip = clip;
@@ -358,6 +361,7 @@ impl<B: Backend<f64>> Tree<B> {
         if changed {
             self.mark_dirty(id);
         }
+        changed
     }
 
     /// Update z index.
@@ -373,8 +377,9 @@ impl<B: Backend<f64>> Tree<B> {
 
     /// Update local bounds.
     ///
-    /// This dirties the tree. The changes are propagated on the next call to [`Tree::commit`].
-    pub fn set_local_bounds(&mut self, id: NodeId, bounds: Rect) {
+    /// Returns `true` when the local value changed. This dirties the tree, and
+    /// the changes are propagated on the next call to [`Tree::commit`].
+    pub fn set_local_bounds(&mut self, id: NodeId, bounds: Rect) -> bool {
         let changed = match self.node_opt_mut(id) {
             Some(n) if n.local.local_bounds != bounds => {
                 n.local.local_bounds = bounds;
@@ -387,6 +392,7 @@ impl<B: Backend<f64>> Tree<B> {
         if changed {
             self.mark_dirty(id);
         }
+        changed
     }
 
     /// Update node flags.
@@ -2068,9 +2074,9 @@ mod tests {
         let next_bounds = Rect::new(0.0, 0.0, 20.0, 20.0);
         let next_clip = RoundedRect::from_rect(Rect::new(0.0, 0.0, 10.0, 10.0), 0.0);
 
-        tree.set_local_transform(node, next_tf);
-        tree.set_local_bounds(node, next_bounds);
-        tree.set_local_clip(node, Some(next_clip));
+        assert!(tree.set_local_transform(node, next_tf));
+        assert!(tree.set_local_bounds(node, next_bounds));
+        assert!(tree.set_local_clip(node, Some(next_clip)));
 
         assert!(tree.needs_commit());
         assert_eq!(tree.local_transform(node), Some(next_tf));
@@ -2092,6 +2098,31 @@ mod tests {
         assert_eq!(tree.local_clip(node), None);
         assert_eq!(tree.world_transform(node), None);
         assert_eq!(tree.world_bounds(node), None);
+    }
+
+    #[test]
+    fn set_local_methods_return_changed_flag() {
+        let mut tree = Tree::new();
+        let node = tree.insert(None, LocalNode::default());
+        let _ = tree.commit();
+
+        let tf = Affine::translate(Vec2::new(5.0, 0.0));
+        let bounds = Rect::new(0.0, 0.0, 20.0, 20.0);
+        let clip = Some(RoundedRect::from_rect(
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            0.0,
+        ));
+
+        assert!(tree.set_local_transform(node, tf));
+        assert!(tree.set_local_bounds(node, bounds));
+        assert!(tree.set_local_clip(node, clip));
+        assert!(tree.needs_commit());
+
+        let _ = tree.commit();
+        assert!(!tree.set_local_transform(node, tf));
+        assert!(!tree.set_local_bounds(node, bounds));
+        assert!(!tree.set_local_clip(node, clip));
+        assert!(!tree.needs_commit());
     }
 
     #[test]
