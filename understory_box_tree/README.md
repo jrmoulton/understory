@@ -98,6 +98,10 @@ Key operations:
 - [`Tree::commit`] batches adds/updates/removals and produces coarse damage (added/removed AABBs and
   old/new pairs for moved nodes). The reported rectangles may overlap and are not a minimal cover,
   but are sufficient to bound a paint traversal in most UIs.
+- Local node state is updated immediately. After changing local bounds, transforms, clips, or
+  tree structure, cached world-space data and spatial-query results remain at their last
+  committed values until the next [`Tree::commit`]. If you need up-to-date world information,
+  run or wait for that commit first.
 - World AABBs are loose under rotation/shear and rounded-rect clips are approximated by
   their axis-aligned bounds for acceleration; precise hit-filtering is applied where cheap.
 

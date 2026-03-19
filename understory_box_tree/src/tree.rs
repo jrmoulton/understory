@@ -234,14 +234,6 @@ impl<B: Backend<f64>> Tree<B> {
     }
 
     #[inline]
-    fn debug_assert_committed(&self) {
-        debug_assert!(
-            !self.needs_commit,
-            "Tree queries require calling `Tree::commit()` after geometry/tree-structure mutations"
-        );
-    }
-
-    #[inline]
     fn mark_dirty(&mut self, id: NodeId) {
         self.needs_commit = true;
         self.dirty_roots.push(id);
@@ -402,33 +394,35 @@ impl<B: Backend<f64>> Tree<B> {
         n.local.flags = flags;
     }
 
-    /// Return the world transform for a live node as of the last [`Tree::commit`].
+    /// Return the cached world transform for a live node as of the last [`Tree::commit`].
     ///
     /// The returned [`Affine`] maps from the node's local coordinate space into
-    /// the tree's root/world space. Returns `None` for stale identifiers.
+    /// the tree's root/world space. If [`Tree::needs_commit`] is `true`, this
+    /// still returns the most recently committed value, which may be stale
+    /// relative to current local data. Returns `None` for stale identifiers.
     pub fn world_transform(&self, id: NodeId) -> Option<Affine> {
         if !self.is_alive(id) {
             return None;
         }
-        self.debug_assert_committed();
         self.nodes
             .get(id.idx())
             .and_then(|slot| slot.as_ref())
             .map(|node| node.world.world_transform)
     }
 
-    /// Return the world-space axis-aligned bounding box for a live node.
+    /// Return the cached world-space axis-aligned bounding box for a live node.
     ///
     /// This is the loose AABB computed during [`Tree::commit`], after applying
     /// local transforms and any active clips. It fully contains the transformed
     /// bounds but may not be tight, especially under rotation or rounded clips.
     /// This is the same AABB used for spatial indexing and rectangle queries.
+    /// If [`Tree::needs_commit`] is `true`, this still returns the most recently
+    /// committed value, which may be stale relative to current local data.
     /// Returns `None` for stale identifiers.
     pub fn world_bounds(&self, id: NodeId) -> Option<Rect> {
         if !self.is_alive(id) {
             return None;
         }
-        self.debug_assert_committed();
         self.nodes
             .get(id.idx())
             .and_then(|slot| slot.as_ref())
@@ -570,11 +564,13 @@ impl<B: Backend<f64>> Tree<B> {
     ///   world-space bounds and clip to be eligible.
     /// - Among candidates, higher `z_index` wins; if `z_index` ties, deeper nodes
     ///   in the tree win; if that also ties, the newer [`NodeId`] wins.
+    /// - If [`Tree::needs_commit`] is `true`, this still queries the most
+    ///   recently committed spatial index and cached world-space data, so the
+    ///   result may be stale relative to current local mutations.
     ///
     /// This tie-break is intentionally deterministic for now. In the future this
     /// may be made configurable (for example via a `TieBreakPolicy`).
     pub fn hit_test_point(&self, point: Point, filter: QueryFilter) -> Option<Hit> {
-        self.debug_assert_committed();
         let mut best: Option<(NodeId, i32, u16)> = None;
         self.index.visit_point(point.x, point.y, |_, id| {
             // The spatial index provides a coarse world-AABB candidate set. Everything below is
@@ -648,12 +644,14 @@ impl<B: Backend<f64>> Tree<B> {
     /// - Nodes must satisfy the [`QueryFilter`] and have a non-empty intersection
     ///   between their world-space bounds and the supplied rectangle to be yielded.
     /// - The returned [`NodeId`]s are in an unspecified order; no z-sorting is applied.
+    /// - If [`Tree::needs_commit`] is `true`, this still queries the most
+    ///   recently committed spatial index, so the result may be stale relative
+    ///   to current local mutations.
     pub fn intersect_rect<'a>(
         &'a self,
         rect: Rect,
         filter: QueryFilter,
     ) -> impl Iterator<Item = NodeId> + 'a {
-        self.debug_assert_committed();
         let q = rect_to_aabb(rect);
         self.index
             .query_rect(q)
@@ -675,12 +673,14 @@ impl<B: Backend<f64>> Tree<B> {
     /// - `point` is interpreted in world coordinates.
     /// - Nodes must satisfy the [`QueryFilter`] and contain the given point to be yielded.
     /// - The returned [`NodeId`]s are in an unspecified order; no z-sorting is applied.
+    /// - If [`Tree::needs_commit`] is `true`, this still queries the most
+    ///   recently committed spatial index, so the result may be stale relative
+    ///   to current local mutations.
     pub fn containing_point<'a>(
         &'a self,
         point: Point,
         filter: QueryFilter,
     ) -> impl Iterator<Item = NodeId> + 'a {
-        self.debug_assert_committed();
         self.index
             .query_point(point.x, point.y)
             .map(|(_, id)| id)
@@ -1167,18 +1167,111 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "Tree queries require calling `Tree::commit()`")]
-    fn hit_test_without_commit_panics_in_debug() {
+    fn hit_test_uses_last_committed_state_while_dirty() {
         let mut tree = Tree::new();
-        tree.insert(
+        let node = tree.insert(
             None,
             LocalNode {
                 local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
                 ..Default::default()
             },
         );
-        let _ = tree.hit_test_point(Point::new(5.0, 5.0), QueryFilter::new());
+        let _ = tree.commit();
+
+        let hit = tree.hit_test_point(Point::new(5.0, 5.0), QueryFilter::new());
+        assert_eq!(hit.as_ref().map(|hit| hit.node), Some(node));
+
+        tree.set_local_transform(node, Affine::translate(Vec2::new(50.0, 0.0)));
+        assert!(tree.needs_commit());
+
+        // Queries keep using the last committed index/world cache until the next commit.
+        let stale_hit = tree.hit_test_point(Point::new(5.0, 5.0), QueryFilter::new());
+        assert_eq!(stale_hit.as_ref().map(|hit| hit.node), Some(node));
+        assert!(tree
+            .hit_test_point(Point::new(55.0, 5.0), QueryFilter::new())
+            .is_none());
+
+        let _ = tree.commit();
+        assert!(tree
+            .hit_test_point(Point::new(5.0, 5.0), QueryFilter::new())
+            .is_none());
+        let committed_hit = tree.hit_test_point(Point::new(55.0, 5.0), QueryFilter::new());
+        assert_eq!(committed_hit.as_ref().map(|hit| hit.node), Some(node));
+    }
+
+    #[test]
+    fn spatial_queries_use_last_committed_state_while_dirty() {
+        let mut tree = Tree::new();
+        let node = tree.insert(
+            None,
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+                ..Default::default()
+            },
+        );
+        let _ = tree.commit();
+
+        let committed_rect_hits: Vec<_> = tree
+            .intersect_rect(Rect::new(0.0, 0.0, 10.0, 10.0), QueryFilter::new())
+            .collect();
+        let committed_point_hits: Vec<_> = tree
+            .containing_point(Point::new(5.0, 5.0), QueryFilter::new())
+            .collect();
+        assert!(set_equality(&committed_rect_hits, &[node]));
+        assert!(set_equality(&committed_point_hits, &[node]));
+
+        tree.set_local_transform(node, Affine::translate(Vec2::new(50.0, 0.0)));
+        assert!(tree.needs_commit());
+
+        let stale_rect_hits: Vec<_> = tree
+            .intersect_rect(Rect::new(0.0, 0.0, 10.0, 10.0), QueryFilter::new())
+            .collect();
+        let stale_point_hits: Vec<_> = tree
+            .containing_point(Point::new(5.0, 5.0), QueryFilter::new())
+            .collect();
+        assert!(set_equality(&stale_rect_hits, &[node]));
+        assert!(set_equality(&stale_point_hits, &[node]));
+
+        let _ = tree.commit();
+
+        let moved_rect_hits: Vec<_> = tree
+            .intersect_rect(Rect::new(50.0, 0.0, 60.0, 10.0), QueryFilter::new())
+            .collect();
+        let moved_point_hits: Vec<_> = tree
+            .containing_point(Point::new(55.0, 5.0), QueryFilter::new())
+            .collect();
+        assert!(set_equality(&moved_rect_hits, &[node]));
+        assert!(set_equality(&moved_point_hits, &[node]));
+    }
+
+    #[test]
+    fn world_accessors_return_last_committed_values_while_dirty() {
+        let mut tree = Tree::new();
+        let node = tree.insert(
+            None,
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+                ..Default::default()
+            },
+        );
+        let _ = tree.commit();
+
+        let committed_tf = tree.world_transform(node).unwrap();
+        let committed_bounds = tree.world_bounds(node).unwrap();
+
+        tree.set_local_transform(node, Affine::translate(Vec2::new(5.0, 0.0)));
+        tree.set_local_bounds(node, Rect::new(0.0, 0.0, 20.0, 10.0));
+
+        assert!(tree.needs_commit());
+        assert_eq!(tree.world_transform(node), Some(committed_tf));
+        assert_eq!(tree.world_bounds(node), Some(committed_bounds));
+
+        let _ = tree.commit();
+        assert_eq!(
+            tree.world_transform(node),
+            Some(Affine::translate(Vec2::new(5.0, 0.0)))
+        );
+        assert_eq!(tree.world_bounds(node), Some(Rect::new(5.0, 0.0, 25.0, 10.0)));
     }
 
     #[test]
