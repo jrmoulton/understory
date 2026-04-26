@@ -18,6 +18,7 @@ members = [
   "understory_view2d",
   "understory_virtual_list",
   "understory_event_state",
+  "understory_frame_pacing",
   "benches",
   "examples",
 ]

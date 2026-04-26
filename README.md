@@ -25,6 +25,12 @@ The focus is on clean separation of concerns, pluggable performance trade‑offs
   - Designed to integrate with any event routing or spatial query system.
   - Generic over node/widget ID types with no framework assumptions.
 
+- `understory_frame_pacing`
+  - Platform-independent frame pacing models and scheduling primitives for render loops.
+  - Separates frame work that can run before surface acquisition from surface-bound work, then returns wake/action/presentation decisions.
+  - Supports fixed-rate and variable-refresh displays, animation versus latency-sensitive input, and rolling CPU/GPU timing estimates.
+  - Headless and renderer-agnostic; intended to sit below platform layers that provide display links, swapchain/drawable acquisition, GPU timing, and present calls.
+
 - `understory_focus`
   - Focus navigation primitives: navigation intents, per‑node focus properties, and a spatial view of focusable candidates.
   - Provides pluggable policies for directional and ordered navigation, and an optional adapter for integrating with `understory_box_tree`.
@@ -126,6 +132,7 @@ For example, a canvas or DWG or DXF viewer can reuse the box and index layers wi
   - `understory_focus/README.md` covers focus navigation policies and adapters.
   - `understory_inspector/README.md` documents the host-side controller for outline-backed inspection UIs.
   - `understory_outline/README.md` documents hierarchical visible-row projection, expansion state, and grouped/tree-style usage.
+  - `understory_frame_pacing/README.md` documents the platform-independent frame scheduler.
   - `understory_selection/README.md` documents the selection container, anchor/revision semantics, and click helpers.
   - `understory_timing/README.md` documents host-driven timer queue scheduling, expiration, and repeat policy.
   - `understory_transcript/README.md` documents append-order transcript storage, generic payloads, explicit update semantics, typed entry kinds, and chat/tool/process-style usage.
